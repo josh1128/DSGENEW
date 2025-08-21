@@ -15,7 +15,6 @@
 #        KEEPING policy smoothing ρ_i so i_t decays geometrically.
 #      - Toggle to show policy rate in **levels (% annual)** instead of deviations (pp).
 #      - NEW: Out-of-sample forecast mode with calendar date labels and optional CSV shocks.
-#      - NEW: (Simple NK) **Guarantee convergence** option projects parameters into a stable region.
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -93,62 +92,10 @@ class NKParamsSimple:
     rho_u: float = 0.50   # ρu: persistence of cost-push shock
     gamma_pi: float = 0.50  # γπ: inflation inertia
 
-def project_params_to_stable(p: NKParamsSimple) -> NKParamsSimple:
-    """
-    Project parameters to a region that ensures convergence to steady state
-    for one-off (or decaying) shocks:
-      - Enforce Taylor principle: φπ >= 1.05
-      - Clip AR coefficients strictly inside unit circle
-      - Keep σ positive and not tiny
-      - Ensure the algebraic denominator used for x_t solution stays away from zero
-    """
-    p2 = NKParamsSimple(**vars(p))
-    # Core bounds
-    p2.sigma     = max(0.10, float(p2.sigma))
-    p2.kappa     = min(max(0.01, float(p2.kappa)), 1.00)
-    p2.phi_pi    = max(1.05, float(p2.phi_pi))     # Taylor principle
-    p2.phi_x     = min(max(0.0, float(p2.phi_x)), 2.0)
-    p2.rho_i     = min(max(0.0, float(p2.rho_i)), 0.98)
-    p2.rho_x     = min(max(0.0, float(p2.rho_x)), 0.95)
-    p2.rho_r     = min(max(0.0, float(p2.rho_r)), 0.98)
-    p2.rho_u     = min(max(0.0, float(p2.rho_u)), 0.98)
-    p2.gamma_pi  = min(max(0.0, float(p2.gamma_pi)), 0.95)
-
-    # Guard the x_t denominator: denom = 1 + ((1 - ρ_i)*(φπ κ + φx) - κ)/σ
-    A_x    = (1 - p2.rho_i) * (p2.phi_pi * p2.kappa + p2.phi_x) - p2.kappa
-    denom  = 1.0 + (A_x / p2.sigma)
-    floor  = 0.15
-    if denom < floor:
-        # Reduce the strength of contemporaneous policy load to lift denom
-        # Scale φx and κ contributions inside A_x toward a safer value
-        # Keep φπ (Taylor principle) intact.
-        # Compute scale needed to reach denom=floor, then softly blend.
-        need = floor - denom
-        # Approximate sensitivity of denom to φx, κ:
-        sens = (1 - p2.rho_i) * (1.0) / p2.sigma + (-(1.0) / p2.sigma)  # rough positive number
-        sens = max(sens, 1e-3)
-        scale_down = 1.0 - min(0.5, need / (abs(sens) + 1e-6))  # cap shrink at 50%
-        p2.phi_x = p2.phi_x * scale_down
-        p2.kappa = max(0.01, p2.kappa * scale_down)
-        # Recompute to ensure we're above floor
-        A_x   = (1 - p2.rho_i) * (p2.phi_pi * p2.kappa + p2.phi_x) - p2.kappa
-        denom = 1.0 + (A_x / p2.sigma)
-        if denom < floor:
-            # As a last resort, nudge σ up a bit
-            p2.sigma = max(p2.sigma, (A_x) / (floor - 1.0) + 0.10)
-
-    return p2
-
 class SimpleNK3EqBuiltIn:
     """Tiny 3-equation NK model used for quick IRFs or exogenous-path simulations."""
-    def __init__(self, params: Optional[NKParamsSimple] = None, guarantee_convergence: bool = False):
-        p = params or NKParamsSimple()
-        self.p = project_params_to_stable(p) if guarantee_convergence else p
-        self.enforced = guarantee_convergence
-
-    def _safe_denom(self, denom: float) -> float:
-        # Numerical guard for the linear solve of x_t
-        return max(denom, 1e-6)
+    def __init__(self, params: Optional[NKParamsSimple] = None):
+        self.p = params or NKParamsSimple()
 
     def irf(
         self,
@@ -160,7 +107,7 @@ class SimpleNK3EqBuiltIn:
     ):
         """
         Impulse responses for output gap (x), inflation (pi), and rate (i) to a one-time shock.
-        All variables are in **percentage points** (pp) deviations from baseline (steady state = 0).
+        All variables are in **percentage points** (pp) deviations from baseline.
         """
         p = self.p
         x = np.zeros(T); pi = np.zeros(T); i = np.zeros(T)
@@ -169,13 +116,13 @@ class SimpleNK3EqBuiltIn:
         # Initialize one-time shocks
         if shock == "demand":
             r_nat[t0] = size_pp
-            rho_sh = p.rho_r if rho_override is None else rho_override
+            rho_sh = rho_override if rho_override is not None else p.rho_r
         elif shock == "cost":
             u[t0] = size_pp
-            rho_sh = p.rho_u if rho_override is None else rho_override
+            rho_sh = rho_override if rho_override is not None else p.rho_u
         elif shock == "policy":
             e_i[t0] = size_pp
-            rho_sh = None  # one-off policy shock
+            rho_sh = None
         else:
             raise ValueError("shock must be 'demand','cost','policy'")
 
@@ -187,9 +134,9 @@ class SimpleNK3EqBuiltIn:
                 elif shock == "cost":
                     u[t] += (rho_sh or 0.0) * u[t-1]
 
-            x_lag  = x[t-1]  if t>0 else 0.0
+            x_lag = x[t-1] if t>0 else 0.0
             pi_lag = pi[t-1] if t>0 else 0.0
-            i_lag  = i[t-1]  if t>0 else 0.0
+            i_lag = i[t-1] if t>0 else 0.0
 
             # Solve contemporaneously for x_t given policy rule and Phillips
             A_x = (1 - p.rho_i) * (p.phi_pi * p.kappa + p.phi_x) - p.kappa
@@ -199,9 +146,9 @@ class SimpleNK3EqBuiltIn:
                 + ((1 - p.rho_i) * p.phi_pi - 1.0) * u[t]
                 + e_i[t]
             )
-            denom = self._safe_denom(1.0 + (A_x / p.sigma))
-            num   = (p.rho_x * x_lag) - (B_const / p.sigma) + (r_nat[t] / p.sigma)
-            x[t]  = num / denom
+            denom = 1.0 + (A_x / p.sigma)
+            num = (p.rho_x * x_lag) - (B_const / p.sigma) + (r_nat[t] / p.sigma)
+            x[t] = num / max(denom, 1e-8)
             pi[t] = p.gamma_pi * pi_lag + p.kappa * x[t] + u[t]
             i[t]  = p.rho_i * i_lag + (1 - p.rho_i) * (p.phi_pi * pi[t] + p.phi_x * x[t]) + e_i[t]
 
@@ -219,7 +166,7 @@ class SimpleNK3EqBuiltIn:
     ):
         """
         Simulate a forward path given initial conditions and **exogenous sequences**
-        for demand (r_nat), cost-push (u), and policy disturbance (e_i). Units = pp deviations.
+        for demand (r_nat), cost-push (u), and policy disturbance (e_i). Units = pp.
         """
         p = self.p
         x = np.zeros(T); pi = np.zeros(T); i = np.zeros(T)
@@ -246,13 +193,168 @@ class SimpleNK3EqBuiltIn:
                 + ((1 - p.rho_i) * p.phi_pi - 1.0) * u[t]
                 + e_i[t]
             )
-            denom = self._safe_denom(1.0 + (A_x / p.sigma))
-            num   = (p.rho_x * x_lag) - (B_const / p.sigma) + (r_nat[t] / p.sigma)
-            x[t]  = num / denom
+            denom = 1.0 + (A_x / p.sigma)
+            num = (p.rho_x * x_lag) - (B_const / p.sigma) + (r_nat[t] / p.sigma)
+            x[t]  = num / max(denom, 1e-8)
             pi[t] = p.gamma_pi * pi_lag + p.kappa * x[t] + u[t]
             i[t]  = p.rho_i * i_lag + (1 - p.rho_i) * (p.phi_pi * pi[t] + p.phi_x * x[t]) + e_i[t]
 
         return np.arange(T), x, pi, i
+
+# =========================
+# Sidebar
+# =========================
+with st.sidebar:
+    st.header("Model selection")
+    model_choice = st.selectbox("Choose model version", ["Original (DSGE.xlsx)", "Simple NK (built-in)"], index=0)
+
+    st.header("Simulation settings")
+    T = st.slider("Horizon (quarters)", 8, 60, 20, 1)
+
+    if model_choice == "Original (DSGE.xlsx)":
+        xlf = st.file_uploader("Upload DSGE.xlsx (optional)", type=["xlsx"], key="upload_original", help="If omitted, the app looks for 'DSGE.xlsx' next to this script.")
+        fallback = Path(__file__).parent / "DSGE.xlsx"
+
+        rho_sim = st.slider("Policy smoothing ρ (Taylor)", 0.0, 0.95, 0.80, 0.05, help="How much the policy rate inherits from its own past. Higher ρ ⇒ more persistence.")
+
+        st.header("Inflation target for Taylor")
+        use_sample_mean = st.checkbox("Use sample mean of DlogCPI as target π*", value=False, help="If checked, π* is the average of your sample's quarterly inflation.")
+        if use_sample_mean:
+            target_annual_pct = None
+            st.caption("π* will be set to sample mean (quarterly) after data loads.")
+        else:
+            target_annual_pct = st.slider("π* (annual %)", 0.0, 5.0, 2.0, 0.1, help="Annualized target inflation; we convert this to a quarterly decimal.")
+        st.divider()
+
+        st.header("Shock")
+        shock_target = st.selectbox(
+            "Apply shock to",
+            ["None", "IS (Demand)", "Phillips (Supply)", "Taylor (Policy tightening)", "Taylor (Policy easing)"],
+            index=0,
+            help="Choose which block is directly shocked. Policy shocks move the rate by the bp size below."
+        )
+        is_shock_size_pp = st.number_input("IS shock (Δ DlogGDP, pp)", value=0.50, step=0.10, format="%.2f", help="One-time bump to GDP growth (percentage points).")
+        pc_shock_size_pp = st.number_input("Phillips shock (Δ DlogCPI, pp)", value=0.10, step=0.05, format="%.2f", help="One-time bump to inflation (percentage points).")
+        policy_shock_bp_abs = st.number_input("Policy shock size (absolute bp)", value=25, step=5, format="%d", help="Size of the policy rate shock in basis points (25 bp = 0.25%).")
+        shock_quarter = st.slider("Shock timing (t)", 1, T-1, 1, 1, help="Quarter index at which the shock hits.")
+        shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05, help="How much the shock decays each period. 0 = one-and-done.")
+
+        st.header("Policy shock behavior")
+        policy_mode = st.radio(
+            "Choose how the policy shock is applied",
+            ["Add after smoothing (standard)", "Add to target (inside 1−ρ)", "Force local jump (override)"],
+            index=0,
+            help=("How policy shocks enter the partial-adjustment rule:\n"
+                  "• **Add after smoothing**: i_t = ρ i_{t-1} + (1−ρ) i*_t + ε^pol_t\n"
+                  "• **Add to target**: i_t = ρ i_{t-1} + (1−ρ)(i*_t + ε^pol_t)\n"
+                  "• **Force local jump**: Ensures a minimum jump by the shock size at t.")
+        )
+
+        # =========================
+        # Variable Toggles
+        # =========================
+        st.divider()
+        st.header("Variable selection (include/exclude)")
+
+        IS_ALL = ["DlogGDP_L1", "Real_Rate_L2_data", "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy"]
+        PC_ALL = ["Dlog_CPI_L1", "DlogGDP_L1", "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"]
+        TR_ALL = ["Nominal_Rate_L1", "Inflation_Gap", "DlogGDP"]
+
+        with st.expander("IS Curve regressors", expanded=True):
+            is_selected = st.multiselect("Use these variables in the IS regression:",
+                                         IS_ALL, default=IS_ALL, key="is_vars",
+                                         help="Pick the demand-side drivers used to explain Δlog GDP.")
+        with st.expander("Phillips Curve regressors", expanded=True):
+            pc_selected = st.multiselect("Use these variables in the Phillips regression:",
+                                         PC_ALL, default=PC_ALL, key="pc_vars",
+                                         help="Pick the price-setting drivers used to explain Δlog CPI.")
+        with st.expander("Taylor Rule regressors", expanded=True):
+            tr_selected = st.multiselect("Use these variables in the Taylor (partial adjustment) regression:",
+                                         TR_ALL, default=TR_ALL, key="tr_vars",
+                                         help="Pick the policy rule inputs. ‘Inflation_Gap’ = Δlog CPI − π*.")
+
+    else:
+        # ======= Parameter → Curve map (quick card) =======
+        st.info("**Which parameters affect which curve?**  \n"
+                "• **IS (Demand)**: σ, ρx, ρr  \n"
+                "• **Phillips (Supply)**: κ, γπ, ρu  \n"
+                "• **Taylor Rule (Policy)**: φπ, φx, ρi")
+
+        st.header("Simple NK parameters (pp units)")
+
+        # -------- IS (Demand) --------
+        st.subheader("IS Curve (Demand): controls how rates and shocks move activity (x_t)")
+        sigma = st.slider("σ — Demand sensitivity denominator",
+                          0.2, 5.0, 1.00, 0.05,
+                          help="Bigger σ ⇒ spending is *less* sensitive to real rates (1/σ is sensitivity).")
+        rho_x = st.slider("ρx — Output persistence",
+                          0.0, 0.98, 0.50, 0.02,
+                          help="How much yesterday’s output gap carries into today.")
+        rho_r = st.slider("ρr — Demand-shock persistence (r^n_t)",
+                          0.0, 0.98, 0.80, 0.02,
+                          help="How long a demand shock sticks around.")
+
+        # -------- Phillips (Supply) --------
+        st.subheader("Phillips Curve (Supply): links activity to inflation (π_t)")
+        kappa = st.slider("κ — Phillips slope", 0.01, 0.50, 0.10, 0.01,
+                          help="How strongly the output gap moves inflation.")
+        gamma_pi = st.slider("γπ — Inflation inertia", 0.0, 0.95, 0.50, 0.05,
+                             help="How much last period’s inflation carries over.")
+        rho_u = st.slider("ρu — Cost-push shock persistence (u_t)", 0.0, 0.98, 0.50, 0.02,
+                          help="Persistence of non-demand inflation shocks.")
+
+        # -------- Taylor Rule (Policy) --------
+        st.subheader("Taylor Rule (Policy): sets the interest rate (i_t)")
+        phi_pi = st.slider("φπ — Response to inflation", 1.0, 3.0, 1.50, 0.05,
+                           help="How aggressively policy reacts to inflation.")
+        phi_x = st.slider("φx — Response to output gap", 0.00, 1.00, 0.125, 0.005,
+                          help="How much policy reacts to economic slack/heat.")
+        rho_i = st.slider("ρi — Policy rate smoothing", 0.0, 0.98, 0.80, 0.02,
+                          help="Higher ρi ⇒ rate changes more gradually over time.")
+
+        # ---- Shock controls ----
+        st.divider()
+        st.header("Shock (IRF mode)")
+        shock_type_nk = st.selectbox(
+            "Shock type (what we 'poke')",
+            ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"],
+            index=0,
+            help="Pick which block gets a one-time disturbance."
+        )
+        shock_size_pp_nk = st.number_input(
+            "Shock size (percentage points, pp)", value=1.00, step=0.25, format="%.2f",
+            help="Magnitude of the initial shock (pp). Use negative for easing."
+        )
+        shock_quarter_nk = st.slider(
+            "Shock timing t (quarter index)", 1, T-1, 1, 1,
+            help="Quarter index where the shock hits."
+        )
+        shock_persist_nk = st.slider(
+            "Shock persistence ρ_shock (for demand/cost)", 0.0, 0.98, 0.80, 0.02,
+            help="Decay rate of the shock each quarter."
+        )
+
+        # ---- Snap-back option ----
+        snapback = st.checkbox(
+            "Snap-back (no persistence after the shock)",
+            value=True,
+            help="Sets ρx = γπ = 0 and forces the shock to be one-period (ρ_shock = 0). "
+                 "Policy smoothing ρi is kept so i_t decays geometrically."
+        )
+
+        # ---- Display option for policy rate UNITS ----
+        units_mode = st.radio(
+            "Policy rate units",
+            ["Deviation (pp)", "Level (% annual)"],
+            index=0,
+            help="Deviation: IRFs in percentage points around zero. Level: add a baseline rate and show %."
+        )
+
+    neutral_rate_pct = st.number_input(
+        "Baseline (neutral) nominal policy rate — % annual",
+        value=2.00, step=0.25, format="%.2f",
+        help="Use 2.00 for Bank of Canada's target neutral rate."
+    )
 
 # =========================
 # ORIGINAL MODEL (DSGE.xlsx)
@@ -455,133 +557,6 @@ def simulate_original(
     return g, p, i
 
 # =========================
-# Sidebar
-# =========================
-with st.sidebar:
-    st.header("Model selection")
-    model_choice = st.selectbox("Choose model version", ["Original (DSGE.xlsx)", "Simple NK (built-in)"], index=0)
-
-    st.header("Simulation settings")
-    T = st.slider("Horizon (quarters)", 8, 60, 20, 1)
-
-    if model_choice == "Original (DSGE.xlsx)":
-        xlf = st.file_uploader("Upload DSGE.xlsx (optional)", type=["xlsx"], key="upload_original", help="If omitted, the app looks for 'DSGE.xlsx' next to this script.")
-        fallback = Path(__file__).parent / "DSGE.xlsx"
-
-        rho_sim = st.slider("Policy smoothing ρ (Taylor)", 0.0, 0.95, 0.80, 0.05, help="How much the policy rate inherits from its own past. Higher ρ ⇒ more persistence.")
-
-        st.header("Inflation target for Taylor")
-        use_sample_mean = st.checkbox("Use sample mean of DlogCPI as target π*", value=False, help="If checked, π* is the average of your sample's quarterly inflation.")
-        if use_sample_mean:
-            target_annual_pct = None
-            st.caption("π* will be set to sample mean (quarterly) after data loads.")
-        else:
-            target_annual_pct = st.slider("π* (annual %)", 0.0, 5.0, 2.0, 0.1, help="Annualized target inflation; we convert this to a quarterly decimal.")
-        st.divider()
-
-        st.header("Shock")
-        shock_target = st.selectbox(
-            "Apply shock to",
-            ["None", "IS (Demand)", "Phillips (Supply)", "Taylor (Policy tightening)", "Taylor (Policy easing)"],
-            index=0,
-            help="Choose which block is directly shocked. Policy shocks move the rate by the bp size below."
-        )
-        is_shock_size_pp = st.number_input("IS shock (Δ DlogGDP, pp)", value=0.50, step=0.10, format="%.2f", help="One-time bump to GDP growth (percentage points).")
-        pc_shock_size_pp = st.number_input("Phillips shock (Δ DlogCPI, pp)", value=0.10, step=0.05, format="%.2f", help="One-time bump to inflation (percentage points).")
-        policy_shock_bp_abs = st.number_input("Policy shock size (absolute bp)", value=25, step=5, format="%d", help="Size of the policy rate shock in basis points (25 bp = 0.25%).")
-        shock_quarter = st.slider("Shock timing (t)", 1, T-1, 1, 1, help="Quarter index at which the shock hits.")
-        shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05, help="How much the shock decays each period. 0 = one-and-done.")
-
-        st.header("Policy shock behavior")
-        policy_mode = st.radio(
-            "Choose how the policy shock is applied",
-            ["Add after smoothing (standard)", "Add to target (inside 1−ρ)", "Force local jump (override)"],
-            index=0,
-            help=("How policy shocks enter the partial-adjustment rule:\n"
-                  "• **Add after smoothing**: i_t = ρ i_{t-1} + (1−ρ) i*_t + ε^pol_t\n"
-                  "• **Add to target**: i_t = ρ i_{t-1} + (1−ρ)(i*_t + ε^pol_t)\n"
-                  "• **Force local jump**: Ensures a minimum jump by the shock size at t.")
-        )
-
-        st.divider()
-        st.header("Variable selection (include/exclude)")
-        IS_ALL = ["DlogGDP_L1", "Real_Rate_L2_data", "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy"]
-        PC_ALL = ["Dlog_CPI_L1", "DlogGDP_L1", "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"]
-        TR_ALL = ["Nominal_Rate_L1", "Inflation_Gap", "DlogGDP"]
-
-        with st.expander("IS Curve regressors", expanded=True):
-            is_selected = st.multiselect("Use these variables in the IS regression:", IS_ALL, default=IS_ALL, key="is_vars")
-        with st.expander("Phillips Curve regressors", expanded=True):
-            pc_selected = st.multiselect("Use these variables in the Phillips regression:", PC_ALL, default=PC_ALL, key="pc_vars")
-        with st.expander("Taylor Rule regressors", expanded=True):
-            tr_selected = st.multiselect("Use these variables in the Taylor (partial adjustment) regression:", TR_ALL, default=TR_ALL, key="tr_vars")
-
-    else:
-        st.info("**Which parameters affect which curve?**  \n"
-                "• **IS (Demand)**: σ, ρx, ρr  \n"
-                "• **Phillips (Supply)**: κ, γπ, ρu  \n"
-                "• **Taylor Rule (Policy)**: φπ, φx, ρi")
-
-        st.header("Simple NK parameters (pp units)")
-
-        # Guarantee convergence toggle
-        guarantee_convergence = st.checkbox(
-            "Guarantee convergence to steady state (project parameters to stable region)",
-            value=True
-        )
-
-        # -------- IS (Demand) --------
-        st.subheader("IS Curve (Demand): controls how rates and shocks move activity (x_t)")
-        sigma = st.slider("σ — Demand sensitivity denominator", 0.2, 5.0, 1.00, 0.05)
-        rho_x = st.slider("ρx — Output persistence", 0.0, 0.98, 0.50, 0.02)
-        rho_r = st.slider("ρr — Demand-shock persistence (r^n_t)", 0.0, 0.98, 0.80, 0.02)
-
-        # -------- Phillips (Supply) --------
-        st.subheader("Phillips Curve (Supply): links activity to inflation (π_t)")
-        kappa = st.slider("κ — Phillips slope", 0.01, 0.50, 0.10, 0.01)
-        gamma_pi = st.slider("γπ — Inflation inertia", 0.0, 0.95, 0.50, 0.05)
-        rho_u = st.slider("ρu — Cost-push shock persistence (u_t)", 0.0, 0.98, 0.50, 0.02)
-
-        # -------- Taylor Rule (Policy) --------
-        st.subheader("Taylor Rule (Policy): sets the interest rate (i_t)")
-        phi_pi = st.slider("φπ — Response to inflation (≥1 ensures determinacy)", 1.0, 3.0, 1.50, 0.05)
-        phi_x = st.slider("φx — Response to output gap", 0.00, 1.00, 0.125, 0.005)
-        rho_i = st.slider("ρi — Policy rate smoothing", 0.0, 0.98, 0.80, 0.02)
-
-        # ---- Shock controls ----
-        st.divider()
-        st.header("Shock (IRF mode)")
-        shock_type_nk = st.selectbox(
-            "Shock type (what we 'poke')",
-            ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"],
-            index=0
-        )
-        shock_size_pp_nk = st.number_input("Shock size (percentage points, pp)", value=1.00, step=0.25, format="%.2f")
-        shock_quarter_nk = st.slider("Shock timing t (quarter index)", 1, T-1, 1, 1)
-        shock_persist_nk = st.slider("Shock persistence ρ_shock (for demand/cost)", 0.0, 0.98, 0.80, 0.02)
-
-        # ---- Snap-back option ----
-        snapback = st.checkbox(
-            "Snap-back (no persistence after the shock)",
-            value=True,
-            help="Sets ρx = γπ = 0 and forces the shock to be one-period (ρ_shock = 0). "
-                 "Policy smoothing ρi is kept so i_t decays geometrically."
-        )
-
-        # ---- Display option for policy rate UNITS ----
-        units_mode = st.radio(
-            "Policy rate units",
-            ["Deviation (pp)", "Level (% annual)"],
-            index=0
-        )
-
-    neutral_rate_pct = st.number_input(
-        "Baseline (neutral) nominal policy rate — % annual",
-        value=2.00, step=0.25, format="%.2f",
-        help="Use 2.00 for Bank of Canada's target neutral rate."
-    )
-
-# =========================
 # Run selected model
 # =========================
 try:
@@ -724,21 +699,17 @@ try:
         # Simple NK (built-in)
         # =========================
         # Build parameter set (apply snapback if chosen)
-        P_raw = NKParamsSimple(
+        P = NKParamsSimple(
             sigma=sigma, kappa=kappa, phi_pi=phi_pi, phi_x=phi_x,
             rho_i=rho_i,
             rho_x=(0.0 if snapback else rho_x),
             rho_r=rho_r, rho_u=rho_u,
             gamma_pi=(0.0 if snapback else gamma_pi)
         )
-        model = SimpleNK3EqBuiltIn(P_raw, guarantee_convergence=guarantee_convergence)
-        if model.enforced:
-            st.caption("Convergence enforced: parameters projected to a stable region (Taylor principle & AR < 1).")
-
+        model = SimpleNK3EqBuiltIn(P)
         label_to_code = {"Demand (IS)": "demand", "Cost-push (Phillips)": "cost", "Policy (Taylor)": "policy"}
         code = label_to_code[shock_type_nk]
         t0 = max(0, min(T-1, shock_quarter_nk - 1))
-
         rho_for_shock = 0.0 if snapback else shock_persist_nk
 
         # ===== IRF block =====
@@ -746,7 +717,6 @@ try:
         h, x0, pi0, i0 = model.irf(code, T, 0.0, t0, rho_for_shock)
         h, xS, piS, iS = model.irf(code, T, shock_size_pp_nk, t0, rho_for_shock)
 
-        # Prepare policy series for plotting in chosen units
         i0_plot, iS_plot = i0.copy(), iS.copy()
         i_ylabel = "pp"
         if units_mode == "Level (% annual)":
@@ -755,10 +725,7 @@ try:
             i_ylabel = "%"
 
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
-        fig, axes = plt.subplots(3, 1, figsize=(12), sharex=True)
-        plt.close(fig)  # ensure not displaying incorrect fig due to typo
         fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
-
         vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
 
         axes[0].plot(h, x0, linewidth=2, label="Baseline")
@@ -800,7 +767,6 @@ try:
             with colC:
                 T_fore = st.slider("Forecast horizon (quarters)", 4, 40, 24, 1)
 
-            # Initial conditions (pp deviations)
             x0_init = st.number_input("Initial output gap x₀ (pp)", value=0.30, step=0.10, format="%.2f")
             pi0_init = st.number_input("Initial inflation π₀ (pp)", value=0.30, step=0.10, format="%.2f")
             i0_init = st.number_input("Initial policy rate i₀ (pp deviation)", value=0.30, step=0.10, format="%.2f")
@@ -827,21 +793,21 @@ try:
                 except Exception as ee:
                     st.warning(f"Could not parse CSV: {ee}")
 
-            # Simulate path (returns pp deviations for all three series)
+            # Simulate path
             _, xF, piF, iF = model.simulate_path(
                 T=T_fore, x0=x0_init, pi0=pi0_init, i0=i0_init,
                 r_nat=r_nat_path, u=u_path, e_i=e_i_path
             )
 
-            # Calendar labels (avoid freq=None bug)
+            # Calendar labels (robust construction; avoids freq=None bug)
             q_start = pd.Period(f"{start_year}Q{start_quarter[-1]}", freq="Q")
             dates = pd.period_range(start=q_start, periods=T_fore, freq="Q").strftime("%YQ%q")
 
-            # Policy rate plotting units
-            i_plot_fore = iF.copy()
+            # Prepare policy rate units
+            i_plot = iF.copy()
             ylab_i = "pp"
             if units_mode == "Level (% annual)":
-                i_plot_fore = neutral_rate_pct + i_plot_fore
+                i_plot = neutral_rate_pct + i_plot
                 ylab_i = "%"
 
             # Plot forecast with calendar x-ticks
@@ -857,7 +823,7 @@ try:
             axesF[1].set_title("Inflation (pp)")
             axesF[1].grid(True, alpha=0.3)
 
-            axesF[2].plot(idx, i_plot_fore, linewidth=2)
+            axesF[2].plot(idx, i_plot, linewidth=2)
             axesF[2].set_title("Policy Rate")
             axesF[2].set_ylabel(ylab_i)
             axesF[2].set_xlabel("Quarter")
