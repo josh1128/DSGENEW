@@ -832,84 +832,82 @@ if forecast_mode_o:
 
         st.divider()
 
-        # ===== Out-of-sample forecast block =====
-        st.subheader("Out-of-sample forecast (Simple NK)")
-        forecast_mode = st.checkbox("Enable forecast mode (label by calendar dates)", value=True)
+# ===== Out-of-sample forecast block (Original DSGE) =====
+st.subheader("Out-of-sample forecast (Original DSGE model)")
+forecast_mode_o = st.checkbox("Enable forecast mode (calendar dates)", value=True, key="forecast_orig")
 
-        if forecast_mode:
-            colA, colB, colC = st.columns(3)
-            with colA:
-                start_year = st.number_input("Start year", value=2019, step=1, format="%d")
-            with colB:
-                start_quarter = st.selectbox("Start quarter", ["Q1", "Q2", "Q3", "Q4"], index=3)
-            with colC:
-                T_fore = st.slider("Forecast horizon (quarters)", 4, 40, 24, 1)
+if forecast_mode_o:
+    colA, colB, colC = st.columns(3)
+    with colA:
+        start_year_o = st.number_input("Start year", value=2019, step=1, format="%d", key="orig_start_year")
+    with colB:
+        start_quarter_o = st.selectbox("Start quarter", ["Q1", "Q2", "Q3", "Q4"], index=3, key="orig_start_q")
+    with colC:
+        T_fore_o = st.slider("Forecast horizon (quarters)", 4, 40, 24, 1, key="orig_fore_T")
 
-            # Initial conditions (match existing model units: x, π, i are pp deviations)
-            x0_init = st.number_input("Initial output gap x₀ (pp)", value=0.30, step=0.10, format="%.2f")
-            pi0_init = st.number_input("Initial inflation π₀ (pp)", value=0.30, step=0.10, format="%.2f")
-            i0_init = st.number_input("Initial policy rate i₀ (pp deviation)", value=0.30, step=0.10, format="%.2f")
+    g0_init = st.number_input("Initial GDP growth ΔlogGDP₀ (%)", value=0.50, step=0.10, format="%.2f", key="orig_g0")/100
+    p0_init = st.number_input("Initial inflation ΔlogCPI₀ (%)", value=0.50, step=0.10, format="%.2f", key="orig_p0")/100
+    i0_init = st.number_input("Initial policy rate i₀ (decimal)", value=0.02, step=0.01, format="%.3f", key="orig_i0")
 
-            st.caption("Optional: upload CSV with columns **r_nat**, **u**, **e_i** (all in pp). Extra columns/rows ignored.")
-            csv = st.file_uploader("Upload exogenous paths (optional)", type=["csv"], key="nk_fore_csv")
+    st.caption("Optional: upload CSV with columns **is_shock**, **pc_shock**, **policy_shock**. Extra columns ignored.")
+    csv_o = st.file_uploader("Upload exogenous paths (optional)", type=["csv"], key="orig_fore_csv")
 
-            r_nat_path = u_path = e_i_path = None
-            if csv is not None:
-                try:
-                    df_exo = pd.read_csv(csv)
-                    def _col(name):
-                        if name in df_exo.columns:
-                            s = pd.to_numeric(df_exo[name], errors="coerce").fillna(0.0).values.astype(float)
-                            if len(s) < T_fore:
-                                s = np.pad(s, (0, T_fore-len(s)), constant_values=0.0)
-                            else:
-                                s = s[:T_fore]
-                            return s
-                        return None
-                    r_nat_path = _col("r_nat")
-                    u_path     = _col("u")
-                    e_i_path   = _col("e_i")
-                except Exception as ee:
-                    st.warning(f"Could not parse CSV: {ee}")
+    is_path = pc_path = pol_path = None
+    if csv_o is not None:
+        try:
+            df_exo = pd.read_csv(csv_o)
+            def _col(name):
+                if name in df_exo.columns:
+                    s = pd.to_numeric(df_exo[name], errors="coerce").fillna(0.0).values.astype(float)
+                    if len(s) < T_fore_o:
+                        s = np.pad(s, (0, T_fore_o-len(s)), constant_values=0.0)
+                    else:
+                        s = s[:T_fore_o]
+                    return s
+                return None
+            is_path  = _col("is_shock")
+            pc_path  = _col("pc_shock")
+            pol_path = _col("policy_shock")
+        except Exception as ee:
+            st.warning(f"Could not parse CSV: {ee}")
 
-            # Simulate path (returns pp deviations for all three series)
-            _, xF, piF, iF = model.simulate_path(
-                T=T_fore, x0=x0_init, pi0=pi0_init, i0=i0_init,
-                r_nat=r_nat_path, u=u_path, e_i=e_i_path
-            )
+    # Run simulation
+    gF, pF, iF = simulate_original(
+        T=T_fore_o, rho_sim=rho_sim, df_est=df_est, models=models_o,
+        means=means_o, i_mean_dec=i0_init, real_rate_mean_dec=real_rate_mean_dec,
+        pi_star_quarterly=pi_star_quarterly,
+        is_shock_arr=(is_path if is_path is not None else np.zeros(T_fore_o)),
+        pc_shock_arr=(pc_path if pc_path is not None else np.zeros(T_fore_o)),
+        policy_shock_arr=(pol_path if pol_path is not None else np.zeros(T_fore_o)),
+        policy_mode=policy_mode
+    )
 
-            # Calendar labels (avoid freq=None bug)
-            q_start = pd.Period(f"{start_year}Q{start_quarter[-1]}", freq="Q")
-            dates = pd.period_range(start=q_start, periods=T_fore, freq="Q").strftime("%YQ%q")
+    # Calendar labels
+    q_start = pd.Period(f"{start_year_o}Q{start_quarter_o[-1]}", freq="Q")
+    dates_o = pd.period_range(start=q_start, periods=T_fore_o, freq="Q").strftime("%YQ%q")
 
-            # ===== NEW: express forecast policy rate in nominal DECIMALS (level) =====
-            # iF is a pp deviation from neutral; neutral_rate_pct is % annual.
-            # Convert to level decimal: (neutral % + deviation pp) / 100
-            i_level_decimal = (neutral_rate_pct + iF) / 100.0
+    # Plot
+    figFo, axesFo = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    idx = np.arange(T_fore_o)
 
-            # Plot forecast with calendar x-ticks
-            plt.rcParams.update({"axes.titlesize": 14, "axes.labelsize": 11, "legend.fontsize": 10})
-            figF, axesF = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
-            idx = np.arange(T_fore)
+    axesFo[0].plot(idx, gF*100, linewidth=2)
+    axesFo[0].set_title("Real GDP Growth (ΔlogGDP, %)")
+    axesFo[0].grid(True)
 
-            axesF[0].plot(idx, xF, linewidth=2)
-            axesF[0].set_title("Output Gap (pp)")
-            axesF[0].grid(True, alpha=0.3)
+    axesFo[1].plot(idx, pF*100, linewidth=2)
+    axesFo[1].set_title("Inflation (ΔlogCPI, %)")
+    axesFo[1].grid(True)
 
-            axesF[1].plot(idx, piF, linewidth=2)
-            axesF[1].set_title("Inflation (pp)")
-            axesF[1].grid(True, alpha=0.3)
+    axesFo[2].plot(idx, iF, linewidth=2)
+    axesFo[2].set_title("Policy Rate (decimal)")
+    axesFo[2].set_ylabel("decimal")
+    axesFo[2].set_xlabel("Quarter")
+    axesFo[2].grid(True)
+    axesFo[2].set_xticks(idx)
+    axesFo[2].set_xticklabels(dates_o, rotation=45)
 
-            axesF[2].plot(idx, i_level_decimal, linewidth=2)
-            axesF[2].set_title("Policy Rate — level (decimal)")  # <- in decimals now
-            axesF[2].set_ylabel("decimal")
-            axesF[2].set_xlabel("Quarter")
-            axesF[2].grid(True, alpha=0.3)
-            axesF[2].set_xticks(idx)
-            axesF[2].set_xticklabels(dates, rotation=45)
-
-            plt.tight_layout()
-            st.pyplot(figF)
+    plt.tight_layout()
+    st.pyplot(figFo)
 
         with st.expander("Symbol glossary (Simple NK)"):
             st.markdown(
@@ -928,6 +926,7 @@ if forecast_mode_o:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
