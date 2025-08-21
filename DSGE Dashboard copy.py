@@ -15,6 +15,7 @@
 #        KEEPING policy smoothing ρ_i so i_t decays geometrically.
 #      - Toggle to show policy rate in **levels (% annual)** instead of deviations (pp).
 #      - NEW: Out-of-sample forecast mode with calendar date labels and optional CSV shocks.
+#        (Forecast now expresses the Taylor-rule policy rate in **nominal decimals**, not pp.)
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -767,6 +768,7 @@ try:
             with colC:
                 T_fore = st.slider("Forecast horizon (quarters)", 4, 40, 24, 1)
 
+            # Initial conditions (match existing model units: x, π, i are pp deviations)
             x0_init = st.number_input("Initial output gap x₀ (pp)", value=0.30, step=0.10, format="%.2f")
             pi0_init = st.number_input("Initial inflation π₀ (pp)", value=0.30, step=0.10, format="%.2f")
             i0_init = st.number_input("Initial policy rate i₀ (pp deviation)", value=0.30, step=0.10, format="%.2f")
@@ -793,22 +795,20 @@ try:
                 except Exception as ee:
                     st.warning(f"Could not parse CSV: {ee}")
 
-            # Simulate path
+            # Simulate path (returns pp deviations for all three series)
             _, xF, piF, iF = model.simulate_path(
                 T=T_fore, x0=x0_init, pi0=pi0_init, i0=i0_init,
                 r_nat=r_nat_path, u=u_path, e_i=e_i_path
             )
 
-            # Calendar labels (robust construction; avoids freq=None bug)
+            # Calendar labels (avoid freq=None bug)
             q_start = pd.Period(f"{start_year}Q{start_quarter[-1]}", freq="Q")
             dates = pd.period_range(start=q_start, periods=T_fore, freq="Q").strftime("%YQ%q")
 
-            # Prepare policy rate units
-            i_plot = iF.copy()
-            ylab_i = "pp"
-            if units_mode == "Level (% annual)":
-                i_plot = neutral_rate_pct + i_plot
-                ylab_i = "%"
+            # ===== NEW: express forecast policy rate in nominal DECIMALS (level) =====
+            # iF is a pp deviation from neutral; neutral_rate_pct is % annual.
+            # Convert to level decimal: (neutral % + deviation pp) / 100
+            i_level_decimal = (neutral_rate_pct + iF) / 100.0
 
             # Plot forecast with calendar x-ticks
             plt.rcParams.update({"axes.titlesize": 14, "axes.labelsize": 11, "legend.fontsize": 10})
@@ -823,9 +823,9 @@ try:
             axesF[1].set_title("Inflation (pp)")
             axesF[1].grid(True, alpha=0.3)
 
-            axesF[2].plot(idx, i_plot, linewidth=2)
-            axesF[2].set_title("Policy Rate")
-            axesF[2].set_ylabel(ylab_i)
+            axesF[2].plot(idx, i_level_decimal, linewidth=2)
+            axesF[2].set_title("Policy Rate — level (decimal)")  # <- in decimals now
+            axesF[2].set_ylabel("decimal")
             axesF[2].set_xlabel("Quarter")
             axesF[2].grid(True, alpha=0.3)
             axesF[2].set_xticks(idx)
@@ -839,7 +839,7 @@ try:
                 r"""
 - **$x_t$** — Output gap (percentage points, pp)  
 - **$\pi_t$** — Inflation (pp)  
-- **$i_t$** — Nominal policy rate (pp deviations; or % level when selected)  
+- **$i_t$** — Nominal policy rate (pp deviations in IRF; **decimal level in forecast plot**)  
 - **$r_t^n$** — Demand / natural-rate shock (pp)  
 - **$u_t$** — Cost-push shock (pp)  
 - **$\sigma$,\,$\rho_x$,\,$\rho_r$** — IS dynamics  
@@ -851,4 +851,6 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
+
 
