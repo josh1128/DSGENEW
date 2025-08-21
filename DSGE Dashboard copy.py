@@ -755,8 +755,7 @@ try:
             i_ylabel = "%"
 
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
-        fig, axes = plt.subplots(3, 1, figsize=( Twelve, 12), sharex=True)
-        # fix typo: use 12 not 'Twelve'
+        fig, axes = plt.subplots(3, 1, figsize=(12), sharex=True)
         plt.close(fig)  # ensure not displaying incorrect fig due to typo
         fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
 
@@ -886,6 +885,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
