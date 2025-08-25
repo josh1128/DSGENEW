@@ -43,27 +43,7 @@ def ensure_decimal_rate(series: pd.Series) -> pd.Series:
     if np.nanmedian(np.abs(s.values)) > 1.0:  # e.g., 3.2 means 3.2%
         return s / 100.0
     return s
-
-def fmt_coef(x: float, nd: int = 3) -> str:
-    """Pretty-print a coefficient with sign (e.g., '+0.123')."""
-    s = f"{x:.{nd}f}"
-    return f"+{s}" if x >= 0 else s
-
-def build_latex_equation(const_val: float, terms: List[tuple], lhs: str, eps_symbol: str) -> str:
-    """Build a LaTeX aligned equation string."""
-    if not terms:
-        rhs_terms = ""
-    else:
-        rhs_terms = " ".join([f"{fmt_coef(c)}\\,{sym}" for (c, sym) in terms])
-    eq = rf"""
-    \begin{{aligned}}
-    {lhs} &= {const_val:.3f} {rhs_terms} + {eps_symbol}
-    \end{{aligned}}
-    """
-    return eq
-
-def row_from_params(params_index: pd.Index, values: Dict[str, float]) -> pd.DataFrame:
-    """Create a 1-row DataFrame for prediction with columns ordered like model.params.index."""
+with columns ordered like model.params.index."""
     cols = list(params_index)
     row = {}
     for c in cols:
@@ -652,6 +632,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
