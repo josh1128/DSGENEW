@@ -39,20 +39,7 @@ st.markdown(
     "- Use the sidebar to **toggle variables** in each curve."
 )
 
-# =========================
-# Helpers
-# =========================
-def ensure_decimal_rate(series: pd.Series) -> pd.Series:
-    """Convert percent-style rates (e.g., 3.2) to decimal (0.032) if needed."""
-    s = pd.to_numeric(series, errors="coerce")
-    if np.nanmedian(np.abs(s.values)) > 1.0:  # e.g., 3.2 means 3.2%
-        return s / 100.0
-    return s
-
-def fmt_coef(x: float, nd: int = 3) -> str:
-    """Pretty-print a coefficient with sign (e.g., '+0.123')."""
-    s = f"{x:.{nd}f}"
-    return f"+{s}" if x >= 0 else s
+# ==============
 
 def build_latex_equation(const_val: float, terms: List[tuple], lhs: str, eps_symbol: str) -> str:
     """Build a LaTeX aligned equation string."""
@@ -896,6 +883,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
