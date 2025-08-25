@@ -418,7 +418,9 @@ def fit_models_original(
     pc_selected: List[str],
     tr_selected: List[str],
 ):
-    """Fit OLS for IS, Phillips, and Taylor (with inflation gap)."""
+    """Fit OLS for IS, Phillips, and Taylor (with inflation gap).
+       OPTION A: keep raw OLS for display; clip φ's (≥0) for simulation.
+    """
     # IS
     if not is_selected:
         raise ValueError("Select at least one regressor for IS (besides constant).")
@@ -448,7 +450,7 @@ def fit_models_original(
     y_tr = df_est["Nominal Rate"]
     model_tr = sm.OLS(y_tr, X_tr).fit()
 
-    # Convert partial-adjustment rule to star-form only if the needed params exist
+    # Convert partial-adjustment rule to star-form
     b0 = float(model_tr.params.get("const", 0.0))
     rhoh = float(model_tr.params.get("Nominal_Rate_L1", 0.0))
     rhoh = min(max(rhoh, 0.0), 0.99)
@@ -459,29 +461,41 @@ def fit_models_original(
     alpha_star = safe_div(b0, (1 - rhoh))
     bpi = float(model_tr.params.get("Inflation_Gap", 0.0))
     bg  = float(model_tr.params.get("DlogGDP", 0.0))
-    phi_pi_star = safe_div(bpi, (1 - rhoh)) if "Inflation_Gap" in model_tr.params.index else np.nan
-    phi_g_star  = safe_div(bg,  (1 - rhoh)) if "DlogGDP" in model_tr.params.index else np.nan
+    phi_pi_star_raw = safe_div(bpi, (1 - rhoh)) if "Inflation_Gap" in model_tr.params.index else np.nan
+    phi_g_star_raw  = safe_div(bg,  (1 - rhoh)) if "DlogGDP"      in model_tr.params.index else np.nan
+
+    # ===== OPTION A: theory-consistent versions used for simulation (clip to ≥ 0)
+    phi_pi_star_sim = np.nan if np.isnan(phi_pi_star_raw) else max(0.0, phi_pi_star_raw)
+    phi_g_star_sim  = np.nan if np.isnan(phi_g_star_raw)  else max(0.0,  phi_g_star_raw)
 
     return {
         "model_is": model_is, "model_pc": model_pc, "model_tr": model_tr,
-        "alpha_star": alpha_star, "phi_pi_star": phi_pi_star, "phi_g_star": phi_g_star,
+        "alpha_star": alpha_star,
+        # raw (display)
+        "phi_pi_star": phi_pi_star_raw, "phi_g_star": phi_g_star_raw,
+        # sim (used in dynamics)
+        "phi_pi_star_sim": phi_pi_star_sim, "phi_g_star_sim": phi_g_star_sim,
         "rho_hat": rhoh, "pi_star_quarterly": float(pi_star_quarterly),
     }
 
 def build_shocks_original(T, target, is_size_pp, pc_size_pp, policy_bp_abs, t0, rho):
-    """Create shock arrays (IS, Phillips, or Policy) with optional AR(1)-style decay."""
+    """Create shock arrays (IS, Phillips, or Policy) with optional AR(1)-style decay.
+       OPTION C: normalize/strip target to avoid string mismatches.
+    """
     is_arr = np.zeros(T); pc_arr = np.zeros(T); pol_arr = np.zeros(T)
 
-    if target == "IS (Demand)":
+    target_norm = (target or "None").strip().lower()
+
+    if target_norm == "is (demand)".lower():
         is_arr[t0] = is_size_pp / 100.0
         for k in range(t0 + 1, T): is_arr[k] = rho * is_arr[k - 1]
-    elif target == "Phillips (Supply)":
+    elif target_norm == "phillips (supply)".lower():
         pc_arr[t0] = pc_size_pp / 100.0
         for k in range(t0 + 1, T): pc_arr[k] = rho * pc_arr[k - 1]
-    elif target == "Taylor (Policy tightening)":
+    elif target_norm == "taylor (policy tightening)".lower():
         pol_arr[t0] =  (policy_bp_abs / 10000.0)
         for k in range(t0 + 1, T): pol_arr[k] = rho * pol_arr[k - 1]
-    elif target == "Taylor (Policy easing)":
+    elif target_norm == "taylor (policy easing)".lower():
         pol_arr[t0] = -(policy_bp_abs / 10000.0)
         for k in range(t0 + 1, T): pol_arr[k] = rho * pol_arr[k - 1]
 
@@ -492,7 +506,9 @@ def simulate_original(
     means: Dict[str, float], i_mean_dec: float, real_rate_mean_dec: float, pi_star_quarterly: float,
     is_shock_arr=None, pc_shock_arr=None, policy_shock_arr=None, policy_mode: str = "Add after smoothing (standard)"
 ):
-    """Forward-simulate GDP growth, inflation, and the rate using the estimated OLS models."""
+    """Forward-simulate GDP growth, inflation, and the rate using the estimated OLS models.
+       Uses theory-consistent φ's (clipped to ≥0) for Taylor target dynamics.
+    """
     g = np.zeros(T); p = np.zeros(T); i = np.zeros(T)
 
     g[0] = float(df_est["DlogGDP"].mean())
@@ -500,7 +516,10 @@ def simulate_original(
     i[0] = i_mean_dec
 
     model_is = models["model_is"]; model_pc = models["model_pc"]; model_tr = models["model_tr"]
-    alpha_star = models["alpha_star"]; phi_pi_star = models["phi_pi_star"]; phi_g_star = models["phi_g_star"]
+    alpha_star = models["alpha_star"]
+    # use clipped φ's for simulation
+    phi_pi_star_sim = models.get("phi_pi_star_sim", np.nan)
+    phi_g_star_sim  = models.get("phi_g_star_sim",  np.nan)
 
     if is_shock_arr is None: is_shock_arr = np.zeros(T)
     if pc_shock_arr is None: pc_shock_arr = np.zeros(T)
@@ -530,12 +549,14 @@ def simulate_original(
         Xpc = row_from_params(model_pc.params.index, vals_pc)
         p[t] = float(model_pc.predict(Xpc).iloc[0]) + pc_shock_arr[t]
 
+        # Taylor target with theory-consistent (clipped) φ's
         pi_gap_t = p[t] - pi_star_quarterly
-        if not np.isnan(alpha_star) and (("Inflation_Gap" in model_tr.params.index) or ("DlogGDP" in model_tr.params.index)):
+        if not np.isnan(alpha_star) and (not np.isnan(phi_pi_star_sim) or not np.isnan(phi_g_star_sim)):
             i_star = (alpha_star
-                      + (0.0 if np.isnan(phi_pi_star) else phi_pi_star) * pi_gap_t
-                      + (0.0 if np.isnan(phi_g_star) else phi_g_star) * g[t])
+                      + (0.0 if np.isnan(phi_pi_star_sim) else phi_pi_star_sim) * pi_gap_t
+                      + (0.0 if np.isnan(phi_g_star_sim)  else phi_g_star_sim)  * g[t])
         else:
+            # fallback: use direct regression (rare)
             vals_tr = {"Nominal_Rate_L1": 0.0, "Inflation_Gap": pi_gap_t, "DlogGDP": g[t]}
             Xtr_star = row_from_params(model_tr.params.index, vals_tr)
             i_star = float(model_tr.predict(Xtr_star).iloc[0])
@@ -589,7 +610,7 @@ try:
             "Dlog_Non_Energy_L1": float(df_est["Dlog_Non_Energy_L1"].mean()),
         }
 
-        # Build shocks & simulate
+        # Build shocks & simulate (OPTION C normalization occurs inside builder)
         is_arr, pc_arr, pol_arr = build_shocks_original(
             T, shock_target, is_shock_size_pp, pc_shock_size_pp, policy_shock_bp_abs, shock_quarter, shock_persist
         )
@@ -629,10 +650,15 @@ try:
 
         plt.tight_layout(); st.pyplot(fig)
 
-        # Readout at the shock quarter
-        if shock_target.startswith("Taylor"):
+        # OPTION C: sanity readout & warning if "tightening" lowers the rate on impact
+        if isinstance(shock_target, str) and "taylor" in shock_target.lower():
             delta_i_bp = (iS - i0)[shock_quarter] * 10000.0
             st.info(f"Δ policy rate at t={shock_quarter}: {delta_i_bp:.1f} bp  |  mode: {policy_mode}  |  ρ={rho_sim:.2f}")
+            if "tightening" in shock_target.lower() and delta_i_bp < 0:
+                st.warning(
+                    f"Tightening selected but Δi at t={shock_quarter} is {delta_i_bp:.1f} bp. "
+                    "Simulation uses theory-consistent φ's (≥0). Check data/estimates if this persists."
+                )
 
         # ===== LaTeX equations (reflect chosen variables) =====
         st.subheader("Estimated Equations (Original model)")
